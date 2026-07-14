@@ -1,0 +1,68 @@
+# ============================================================
+#  .dockerignore - Docker 构建上下文排除清单
+#  保持镜像构建上下文最小，加快构建速度
+# ============================================================
+
+# ---------- Flutter/Dart 构建产物 ----------
+.dart_tool/
+.packages
+.pub-cache/
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+pubspec.lock
+coverage/
+.caches/
+.pub/
+
+# ---------- OpenHarmony/HarmonyOS 构建产物 ----------
+ohos/build/
+ohos/**/build/
+ohos/**/.cxx/
+ohos/**/.hvigor/
+ohos/**/oh_modules/
+ohos/**/*.hap
+ohos/**/*.app
+
+# ---------- IDE 配置 ----------
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.history/
+
+# ---------- Git 与 CI ----------
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# ---------- OS 垃圾 ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+*.swo
+*~
+
+# ---------- 日志与临时 ----------
+*.log
+*.tmp
+*.temp
+.cache/
+
+# ---------- 文档与媒体 ----------
+docs/
+doc/
+*.md
+!README.md
+!README_EN.md
+
+# ---------- 资源文件（如镜像体积敏感可打开）----------
+# assets/
+# assets/**/*.png
+# assets/**/*.ttf
+# assets/**/*.otf

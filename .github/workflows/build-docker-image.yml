@@ -1,0 +1,260 @@
+# =============================================================
+#  GitHub Actions Workflow: 构建 & 推送鸿蒙 Flutter 开发环境 Docker 镜像
+#  功能:
+#    1. 自动构建包含 JDK17 + Flutter-OH + OpenHarmony SDK 的 Docker 镜像
+#    2. 推送到 GitHub Container Registry (ghcr.io)，可选 Docker Hub
+#    3. 支持手动触发、推送 Tag 触发、Dockerfile 变更触发
+#    4. 使用 BuildKit 多阶段缓存，加速构建
+# =============================================================
+
+name: Build & Push OpenHarmony Flutter Docker Image
+
+run-name: >
+  Build Docker Image ${{ github.ref_name }}
+  ${{ inputs.dry_run && '(dry-run)' || '' }}
+  ${{ inputs.push_latest && '+latest' || '' }}
+
+# ---------- 触发条件 ----------
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'docker/v*'           # 例如: docker/v1.0.0
+    paths:
+      - 'docker/**'
+      - '.github/workflows/build-docker-image.yml'
+      - '.fvmrc'              # Flutter 版本变更时重新构建
+
+  pull_request:
+    paths:
+      - 'docker/**'
+      - '.github/workflows/build-docker-image.yml'
+
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (只构建不推送)'
+        type: boolean
+        default: false
+        required: false
+      push_latest:
+        description: '同时推送 :latest 标签'
+        type: boolean
+        default: true
+        required: false
+      build_context:
+        description: 'Docker 构建上下文路径 (默认 docker/ 目录，确保 .dockerignore 与 Dockerfile 匹配)'
+        type: string
+        default: './docker'
+        required: false
+      # ===== 可选：覆盖构建参数 =====
+      flutter_oh_ref:
+        description: 'Flutter-OH Git 引用 (tag/branch/commit)'
+        type: string
+        default: ''
+        required: false
+      deveco_studio_url:
+        description: 'DevEco Studio Linux 版直链'
+        type: string
+        default: ''
+        required: false
+      ohos_sdk_url:
+        description: 'OpenHarmony SDK Linux 版直链'
+        type: string
+        default: ''
+        required: false
+
+# ---------- 权限 (ghcr.io 推送必需) ----------
+permissions:
+  contents: read
+  packages: write
+
+# ---------- 全局默认 ----------
+env:
+  # ====== 常用可配置项 ======
+  IMAGE_NAME: beecount-openharmony-builder
+  DOCKERFILE_PATH: ./docker/Dockerfile
+
+  # ====== 可选：Docker Hub 推送配置 (在 Secrets 中配置后启用) ======
+  # 若 Secrets 中配置了 DOCKERHUB_USERNAME 和 DOCKERHUB_TOKEN 会同时推送到 Docker Hub
+  DOCKERHUB_REGISTRY: docker.io
+  DOCKERHUB_NAMESPACE: ${{ secrets.DOCKERHUB_USERNAME }}
+
+  # ====== 国内镜像源 (网络受限环境可选) ======
+  # BUILDKIT_MIRROR: https://docker.mirrors.sjtug.sjtu.edu.cn
+
+# ---------- 任务 ----------
+jobs:
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      # ===== 1. 检出代码 =====
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      # ===== 2. 读取项目元数据 (版本、tag 等) =====
+      - name: Extract metadata for Docker
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+            ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE_NAME }}
+          tags: |
+            # Git Tag (例如 docker/v1.2.3 -> 1.2.3)
+            type=match,pattern=docker/v(.*),group=1,enable=${{ startsWith(github.ref, 'refs/tags/docker/v') }}
+            # SHA 短标签 (每次构建唯一)
+            type=sha,prefix=sha-,format=short
+            # 分支名 (仅 main/master)
+            type=ref,event=branch,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+            # latest 标签
+            type=raw,value=latest,enable=${{ (github.event_name == 'workflow_dispatch' && inputs.push_latest) || startsWith(github.ref, 'refs/tags/docker/v') }}
+          flavor: |
+            latest=false
+            prefix=
+            suffix=
+
+      # ===== 3. 设置 QEMU (如果将来需要多架构构建) =====
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/amd64
+
+      # ===== 4. 设置 Docker Buildx =====
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          # 可选：配置构建驱动参数
+          # driver-opts: |
+          #   network=host
+
+      # ===== 5a. 登录 GitHub Container Registry =====
+      - name: Login to GitHub Container Registry
+        if: ${{ github.event_name != 'pull_request' && !inputs.dry_run }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ===== 5b. 登录 Docker Hub (可选，若配置了 Secrets) =====
+      - name: Login to Docker Hub (optional)
+        if: >
+          github.event_name != 'pull_request'
+          && !inputs.dry_run
+          && secrets.DOCKERHUB_USERNAME != ''
+          && secrets.DOCKERHUB_TOKEN != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # ===== 6. 读取 .fvmrc 中的 Flutter 版本 (作为默认构建参数) =====
+      - name: Read Flutter version from .fvmrc
+        id: fvmrc
+        run: |
+          if [ -f .fvmrc ]; then
+            FLUTTER_REF=$(python3 -c "import json; print(json.load(open('.fvmrc'))['flutter'])" 2>/dev/null || echo "")
+            echo "flutter_ref=$FLUTTER_REF" >> $GITHUB_OUTPUT
+            echo "Detected Flutter-OH version: $FLUTTER_REF"
+          fi
+        shell: bash
+
+      # ===== 7. 构建并推送 Docker 镜像 (使用 BuildKit 层缓存) =====
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ inputs.build_context || '.' }}
+          file: ${{ env.DOCKERFILE_PATH }}
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' && !inputs.dry_run }}
+          load: ${{ inputs.dry_run || github.event_name == 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=gha,scope=docker-ohos-builder
+          cache-to: |
+            type=gha,scope=docker-ohos-builder,mode=max
+          # ---------- 构建参数 ----------
+          build-args: |
+            ${{ (inputs.flutter_oh_ref || steps.fvmrc.outputs.flutter_ref)
+                && format('FLUTTER_OH_REF={0}', inputs.flutter_oh_ref || steps.fvmrc.outputs.flutter_ref)
+                || '' }}
+            ${{ inputs.deveco_studio_url
+                && format('DEVECO_STUDIO_URL={0}', inputs.deveco_studio_url)
+                || '' }}
+            ${{ inputs.ohos_sdk_url
+                && format('OHOS_SDK_URL={0}', inputs.ohos_sdk_url)
+                || '' }}
+          # BuildKit 输出调优
+          provenance: mode=max
+          sbom: true
+
+      # ===== 8. 镜像体积摘要 =====
+      - name: Image digest
+        if: ${{ !inputs.dry_run && github.event_name != 'pull_request' }}
+        run: |
+          echo "## Docker 镜像构建结果 :whale:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **镜像 digest**: \`${{ steps.build.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **镜像 metadata**: \`${{ steps.meta.outputs.json }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 镜像标签" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" | tr ',' '\n' >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # =======================================================
+  #  验证 Job: 使用刚构建的镜像跑 flutter doctor 验证环境
+  # =======================================================
+  verify:
+    name: Verify Environment (flutter doctor)
+    needs: build-and-push
+    if: ${{ inputs.dry_run || github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 仅 load 到本地，不推送
+      - name: Load image locally
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: ohos-builder:verify
+          cache-from: type=gha,scope=docker-ohos-builder
+
+      - name: Run flutter doctor inside container
+        run: |
+          echo "::group::容器启动环境自检"
+          docker run --rm --name ohos-verify \
+            ohos-builder:verify \
+            bash -c "flutter --version && flutter doctor -v || true"
+          echo "::endgroup::"
+
+          echo "::group::ohpm & hvigor 可用性检测"
+          docker run --rm --entrypoint /bin/bash \
+            ohos-builder:verify \
+            -c "which ohpm || echo 'ohpm: not found in PATH'; which hvigorw || which hvigor || echo 'hvigor: not found in PATH'; java -version; node --version; npm --version"
+          echo "::endgroup::"
