@@ -23,13 +23,17 @@ on:
     tags:
       - 'docker/v*'           # 例如: docker/v1.0.0
     paths:
-      - 'docker/**'
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
+      - '.dockerignore'
       - '.github/workflows/build-docker-image.yml'
       - '.fvmrc'              # Flutter 版本变更时重新构建
 
   pull_request:
     paths:
-      - 'docker/**'
+      - 'Dockerfile'
+      - 'docker-entrypoint.sh'
+      - '.dockerignore'
       - '.github/workflows/build-docker-image.yml'
 
   workflow_dispatch:
@@ -45,9 +49,9 @@ on:
         default: true
         required: false
       build_context:
-        description: 'Docker 构建上下文路径 (默认 docker/ 目录，确保 .dockerignore 与 Dockerfile 匹配)'
+        description: 'Docker 构建上下文路径 (默认项目根目录，确保 .dockerignore 与 Dockerfile 匹配)'
         type: string
-        default: './docker'
+        default: '.'
         required: false
       # ===== 可选：覆盖构建参数 =====
       flutter_oh_ref:
@@ -75,7 +79,7 @@ permissions:
 env:
   # ====== 常用可配置项 ======
   IMAGE_NAME: beecount-openharmony-builder
-  DOCKERFILE_PATH: ./docker/Dockerfile
+  DOCKERFILE_PATH: ./Dockerfile
 
   # ====== 可选：Docker Hub 推送配置 (在 Secrets 中配置后启用) ======
   # 若 Secrets 中配置了 DOCKERHUB_USERNAME 和 DOCKERHUB_TOKEN 会同时推送到 Docker Hub
@@ -143,7 +147,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
-          install: true
           # 可选：配置构建驱动参数
           # driver-opts: |
           #   network=host
@@ -245,8 +248,8 @@ jobs:
       - name: Load image locally
         uses: docker/build-push-action@v6
         with:
-          context: ./docker
-          file: ./docker/Dockerfile
+          context: .
+          file: ./Dockerfile
           platforms: linux/amd64
           load: true
           tags: ohos-builder:verify
